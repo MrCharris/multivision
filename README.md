@@ -5,7 +5,8 @@ A real time audio visualizer with six visualization modes. Cassette futurism aes
 
 🔗 **Live Demo:** [minutetomidnight.netlify.app](https://minutetomidnight.netlify.app)
 
-![MULTIVISION Screenshot](screenshot.png)
+<img width="1109" height="781" alt="Screenshot 2026-02-24 at 4 46 04 PM" src="https://github.com/user-attachments/assets/c40046a4-0df4-45b9-aa0c-69fa89d7bdd1" />
+
 
 ---
 
