@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MULTIVISION — Minute to Midnight Edition</title>
+  <meta name="description" content="Real time audio visualizer with spectrum, spectrogram, oscilloscope, vectorscope, stereometer, and meter modes. Cassette futurism aesthetic.">
+  <meta name="author" content="Chris Harris">
+  
+  <!-- Open Graph -->
+  <meta property="og:title" content="MULTIVISION — Minute to Midnight Edition">
+  <meta property="og:description" content="Real time audio visualizer with six visualization modes.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://minutetomidnight.netlify.app">
+  
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎛️</text></svg>">
+  
+  <!-- React via CDN -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    // ================================================
+    // MULTIVISION — Minute to Midnight Edition
+    // ================================================
+    // Real time audio visualizer
+    // Cassette futurism aesthetic
+    //
+    // Creative direction: Chris Harris
+    // Implementation: Built with Claude
+    // 
+    // See README.md for development process
+    // ================================================
+
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    const COTTAGE_WHITE = '#fffff7';
+    const FOREST_GREEN = '#194729';
+    const DEEP_RED = '#8B0000';
+
+    // ============================================
+    // KNOB COMPONENT
+    // ============================================
+
+    const Knob = ({ value, min, max, step, label, onChange, color = FOREST_GREEN }) => {
+      const dragging = useRef(false);
+      const startY = useRef(0);
+      const startValue = useRef(0);
+      const rotation = ((value - min) / (max - min)) * 270 - 135;
+      
+      const handleMouseDown = (e) => {
+        dragging.current = true;
+        startY.current = e.clientY;
+        startValue.current = value;
+        const move = (ev) => {
+          if (!dragging.current) return;
+          const delta = startY.current - ev.clientY;
+          const newVal = startValue.current + (delta / 100) * (max - min);
+          const stepped = Math.round(newVal / step) * step;
+          onChange(Math.max(min, Math.min(max, stepped)));
+        };
+        const up = () => {
+          dragging.current = false;
+          document.removeEventListener('mousemove', move);
+          document.removeEventListener('mouseup', up);
+        };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+      };
+      
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+          <div onMouseDown={handleMouseDown} style={{
+            width: '50px', height: '50px', borderRadius: '50%', border: `3px solid ${color}`,
+            backgroundColor: COTTAGE_WHITE, position: 'relative', cursor: 'grab',
+            transform: `rotate(${rotation}deg)`
+          }}>
+            <div style={{ position: 'absolute', top: '6px', left: '50%', transform: 'translateX(-50%)', width: '4px', height: '14px', backgroundColor: color, borderRadius: '2px' }}/>
+            <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: '12px', height: '12px', borderRadius: '50%', backgroundColor: color }}/>
+          </div>
+          <div style={{ color, fontSize: '9px', fontWeight: '700' }}>{label}</div>
+          <div style={{ color, fontSize: '11px', fontFamily: 'monospace', fontWeight: '700' }}>
+            {Number.isInteger(step) ? value : value.toFixed(1)}
+          </div>
+        </div>
+      );
+    };
+
+    // ============================================
+    // AUDIO VISUALIZER COMPONENT
+    // ============================================
+
+    function AudioVisualizer() {
+      const [mode, setMode] = useState('spectrum');
+      const [audioSource, setAudioSource] = useState('none');
+      const [isActive, setIsActive] = useState(false);
+      const [isPlaying, setIsPlaying] = useState(false);
+      const [currentTime, setCurrentTime] = useState(0);
+      const [duration, setDuration] = useState(0);
+      const [isLoading, setIsLoading] = useState(false);
+      const [loadingProgress, setLoadingProgress] = useState(0);
+      const [selectedFile, setSelectedFile] = useState(null);
+      const [showMidnight, setShowMidnight] = useState(false);
+      const [waveformData, setWaveformData] = useState(null);
+      
+      const [scopeTimebase, setScopeTimebase] = useState(2);
+      const [scopeVdiv, setScopeVdiv] = useState(0.25);
+      const [scopeChannel, setScopeChannel] = useState('both');
+      const [scopeLayout, setScopeLayout] = useState('split');
+      const [triggerMode, setTriggerMode] = useState('auto');
+      const [triggerEdge, setTriggerEdge] = useState('rising');
+      const [triggerLevel, setTriggerLevel] = useState(0);
+      
+      const [vecGain, setVecGain] = useState(1.0);
+      const [vecRotation, setVecRotation] = useState(0);
+      const [vecPersist, setVecPersist] = useState(30);
+      const [vecIntensity, setVecIntensity] = useState(2);
+      
+      const [stereoGain, setStereoGain] = useState(0.8);
+      const [stereoPersist, setStereoPersist] = useState(20);
+      const [spectrogramSpeed, setSpectrogramSpeed] = useState(2);
+      
+      const canvasRef = useRef(null);
+      const waveformCanvasRef = useRef(null);
+      const audioContextRef = useRef(null);
+      const analyserLRef = useRef(null);
+      const analyserRRef = useRef(null);
+      const analyserRef = useRef(null);
+      const sourceRef = useRef(null);
+      const animationRef = useRef(null);
+      const audioBufferRef = useRef(null);
+      const startTimeRef = useRef(0);
+      const pauseTimeRef = useRef(0);
+      const gainNodeRef = useRef(null);
+      const splitterRef = useRef(null);
+      const persistBufferRef = useRef([]);
+      const stereoBufferRef = useRef([]);
+      const spectrogramBufferRef = useRef([]);
+      const canvasHoverRef = useRef({ x: 0, y: 0, active: false });
+      
+      const rmsDbRef = useRef(-60);
+      const peakDbRef = useRef(-60);
+      const lufsRef = useRef(-60);
+      const lufsHistoryRef = useRef([]);
+
+      useEffect(() => () => stopAndCloseAudio(), []);
+
+      const stopAudio = () => {
+        if (animationRef.current) cancelAnimationFrame(animationRef.current);
+        if (sourceRef.current) { try { sourceRef.current.stop(); sourceRef.current.disconnect(); } catch(e){} }
+        sourceRef.current = null;
+        setIsPlaying(false);
+        setCurrentTime(0);
+        pauseTimeRef.current = 0;
+        persistBufferRef.current = [];
+        stereoBufferRef.current = [];
+        spectrogramBufferRef.current = [];
+      };
+
+      const stopAndCloseAudio = () => {
+        stopAudio();
+        if (audioContextRef.current && audioContextRef.current.state !== 'closed') audioContextRef.current.close();
+        audioContextRef.current = null;
+        setIsActive(false);
+      };
+
+      const createSource = () => {
+        if (!audioContextRef.current || !audioBufferRef.current) return null;
+        const source = audioContextRef.current.createBufferSource();
+        source.buffer = audioBufferRef.current;
+        splitterRef.current = audioContextRef.current.createChannelSplitter(2);
+        analyserLRef.current = audioContextRef.current.createAnalyser();
+        analyserRRef.current = audioContextRef.current.createAnalyser();
+        analyserRef.current = audioContextRef.current.createAnalyser();
+        analyserLRef.current.fftSize = 2048;
+        analyserRRef.current.fftSize = 2048;
+        analyserRef.current.fftSize = 2048;
+        gainNodeRef.current = audioContextRef.current.createGain();
+        source.connect(splitterRef.current);
+        source.connect(analyserRef.current);
+        splitterRef.current.connect(analyserLRef.current, 0);
+        splitterRef.current.connect(analyserRRef.current, 1);
+        source.connect(gainNodeRef.current);
+        gainNodeRef.current.connect(audioContextRef.current.destination);
+        return source;
+      };
+
+      const togglePlayPause = async () => {
+        if (!audioBufferRef.current) return;
+        if (isPlaying) {
+          pauseTimeRef.current = audioContextRef.current.currentTime - startTimeRef.current;
+          sourceRef.current.stop();
+          setIsPlaying(false);
+        } else {
+          if (!audioContextRef.current || audioContextRef.current.state === 'closed')
+            audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+          if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
+          sourceRef.current = createSource();
+          sourceRef.current.onended = () => { setIsPlaying(false); setCurrentTime(0); pauseTimeRef.current = 0; };
+          startTimeRef.current = audioContextRef.current.currentTime - pauseTimeRef.current;
+          sourceRef.current.start(0, pauseTimeRef.current);
+          setIsPlaying(true);
+          animate();
+        }
+      };
+
+      const resetAudio = () => {
+        if (isPlaying && sourceRef.current) sourceRef.current.stop();
+        pauseTimeRef.current = 0;
+        setCurrentTime(0);
+        setIsPlaying(false);
+        persistBufferRef.current = [];
+        stereoBufferRef.current = [];
+        spectrogramBufferRef.current = [];
+      };
+
+      const seekTo = async (time) => {
+        const wasPlaying = isPlaying;
+        if (isPlaying && sourceRef.current) sourceRef.current.stop();
+        pauseTimeRef.current = time;
+        setCurrentTime(time);
+        persistBufferRef.current = [];
+        stereoBufferRef.current = [];
+        if (wasPlaying) {
+          if (!audioContextRef.current || audioContextRef.current.state === 'closed')
+            audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+          sourceRef.current = createSource();
+          startTimeRef.current = audioContextRef.current.currentTime - time;
+          sourceRef.current.start(0, time);
+          setIsPlaying(true);
+        }
+      };
+
+      const generateWaveformData = async (arrayBuffer) => {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = await ctx.decodeAudioData(arrayBuffer.slice(0));
+        const raw = buf.getChannelData(0);
+        const samples = 400, blockSize = Math.floor(raw.length / samples);
+        const wf = [];
+        for (let i = 0; i < samples; i++) {
+          let max = 0;
+          for (let j = 0; j < blockSize; j++) { const v = Math.abs(raw[i * blockSize + j]); if (v > max) max = v; }
+          wf.push({ peak: max });
+        }
+        ctx.close();
+        return wf;
+      };
+
+      const drawWaveformScrubber = () => {
+        const canvas = waveformCanvasRef.current;
+        if (!canvas || !waveformData) return;
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        const barW = w / waveformData.length;
+        const progress = duration > 0 ? currentTime / duration : 0;
+        const progressX = progress * w;
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.fillRect(0, 0, w, h);
+        waveformData.forEach((d, i) => {
+          const x = i * barW, barH = d.peak * h * 0.9;
+          ctx.fillStyle = x < progressX ? FOREST_GREEN : FOREST_GREEN + '40';
+          ctx.fillRect(x, (h - barH) / 2, barW - 1, barH);
+        });
+        ctx.fillStyle = FOREST_GREEN;
+        ctx.fillRect(progressX - 2, 0, 4, h);
+        ctx.strokeStyle = FOREST_GREEN;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(0, 0, w, h);
+      };
+
+      useEffect(() => { if (waveformData && waveformCanvasRef.current) drawWaveformScrubber(); }, [waveformData, currentTime, duration]);
+
+      const handleWaveformClick = (e) => {
+        if (!audioBufferRef.current || !duration) return;
+        const rect = waveformCanvasRef.current.getBoundingClientRect();
+        seekTo(Math.max(0, Math.min(duration, ((e.clientX - rect.left) / rect.width) * duration)));
+      };
+
+      const startFileAudio = async (file) => {
+        setIsLoading(true);
+        setLoadingProgress(0);
+        try {
+          stopAndCloseAudio();
+          persistBufferRef.current = [];
+          stereoBufferRef.current = [];
+          spectrogramBufferRef.current = [];
+          for (let i = 0; i < 5; i++) { await new Promise(r => setTimeout(r, 80)); setLoadingProgress((i + 1) * 0.15); }
+          const arrayBuffer = await file.arrayBuffer();
+          setLoadingProgress(0.5);
+          const wf = await generateWaveformData(arrayBuffer);
+          setWaveformData(wf);
+          setLoadingProgress(0.7);
+          audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+          if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
+          audioBufferRef.current = await audioContextRef.current.decodeAudioData(arrayBuffer);
+          setDuration(audioBufferRef.current.duration);
+          setLoadingProgress(0.9);
+          sourceRef.current = createSource();
+          sourceRef.current.onended = () => { setIsPlaying(false); setCurrentTime(0); pauseTimeRef.current = 0; };
+          setAudioSource('file');
+          setIsActive(true);
+          startTimeRef.current = audioContextRef.current.currentTime;
+          pauseTimeRef.current = 0;
+          setLoadingProgress(1);
+          await new Promise(r => setTimeout(r, 150));
+          sourceRef.current.start(0);
+          setIsPlaying(true);
+          setIsLoading(false);
+          setShowMidnight(true);
+          animate();
+        } catch (err) {
+          alert('Error loading audio: ' + err.message);
+          setIsLoading(false);
+        }
+      };
+
+      const formatTime = (s) => `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
+
+      // SPECTRUM
+      const drawSpectrum = (canvas) => {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        if (!analyserRef.current) return;
+        const data = new Uint8Array(analyserRef.current.frequencyBinCount);
+        analyserRef.current.getByteFrequencyData(data);
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.fillRect(0, 0, w, h);
+        const barCount = 64, barW = w / barCount;
+        const sampleRate = audioContextRef.current?.sampleRate || 44100;
+        for (let i = 0; i < barCount; i++) {
+          const idx = Math.floor(i * data.length / barCount);
+          const barH = (data[idx] / 255) * h * 0.9;
+          ctx.fillStyle = FOREST_GREEN;
+          ctx.fillRect(i * barW + 1, h - barH, barW - 2, barH);
+        }
+        if (canvasHoverRef.current.active) {
+          const hx = canvasHoverRef.current.x;
+          const bi = Math.floor(hx / barW);
+          if (bi >= 0 && bi < barCount) {
+            const idx = Math.floor(bi * data.length / barCount);
+            const val = data[idx];
+            const db = val > 0 ? (20 * Math.log10(val / 255)).toFixed(1) : '-∞';
+            const freq = Math.round((bi / barCount) * (sampleRate / 2));
+            ctx.fillStyle = FOREST_GREEN + '30';
+            ctx.fillRect(bi * barW + 1, 0, barW - 2, h);
+            const txt = `${freq >= 1000 ? (freq/1000).toFixed(1) + 'kHz' : freq + 'Hz'} | ${db}dB`;
+            ctx.font = 'bold 16px monospace';
+            const tw = ctx.measureText(txt).width;
+            const tx = Math.min(hx + 15, w - tw - 20);
+            ctx.fillStyle = COTTAGE_WHITE;
+            ctx.fillRect(tx - 8, 15, tw + 16, 28);
+            ctx.strokeStyle = FOREST_GREEN;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(tx - 8, 15, tw + 16, 28);
+            ctx.fillStyle = FOREST_GREEN;
+            ctx.fillText(txt, tx, 35);
+          }
+        }
+        ctx.strokeStyle = FOREST_GREEN;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(0, 0, w, h);
+      };
+
+      // SPECTROGRAM with heat map
+      const drawSpectrogram = (canvas) => {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        if (!analyserRef.current) return;
+        const data = new Uint8Array(analyserRef.current.frequencyBinCount);
+        analyserRef.current.getByteFrequencyData(data);
+        const col = [];
+        for (let i = 0; i < 256; i++) col.push(data[Math.floor(i * data.length / 256)]);
+        for (let s = 0; s < spectrogramSpeed; s++) spectrogramBufferRef.current.push([...col]);
+        while (spectrogramBufferRef.current.length > w) spectrogramBufferRef.current.shift();
+        
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.fillRect(0, 0, w, h);
+        
+        const numCols = spectrogramBufferRef.current.length;
+        const colW = Math.max(1, w / numCols);
+        for (let x = 0; x < numCols; x++) {
+          const c = spectrogramBufferRef.current[x];
+          for (let y = 0; y < c.length; y++) {
+            const v = c[y] / 255;
+            if (v < 0.02) continue;
+            let r, g, b;
+            if (v < 0.25) { r = 0; g = 0; b = Math.floor(v * 4 * 200); }
+            else if (v < 0.5) { const t = (v - 0.25) * 4; r = 0; g = Math.floor(t * 255); b = 200 - Math.floor(t * 200); }
+            else if (v < 0.75) { const t = (v - 0.5) * 4; r = Math.floor(t * 255); g = 255; b = 0; }
+            else { const t = (v - 0.75) * 4; r = 255; g = 255 - Math.floor(t * 128); b = Math.floor(t * 255); }
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.fillRect(x * colW, h - (y / 256) * h - h / 256, Math.ceil(colW), Math.ceil(h / 256) + 1);
+          }
+        }
+        ctx.fillStyle = COTTAGE_WHITE + 'DD';
+        ctx.fillRect(0, 0, 50, h);
+        ctx.font = '11px monospace';
+        ctx.fillStyle = FOREST_GREEN;
+        ctx.textAlign = 'right';
+        const sr = audioContextRef.current?.sampleRate || 44100;
+        [0, 1000, 2000, 5000, 10000, 20000].forEach(f => {
+          if (f <= sr / 2) {
+            const yy = h - (f / (sr / 2)) * h;
+            ctx.fillText(f >= 1000 ? `${f/1000}k` : `${f}`, 45, yy + 4);
+          }
+        });
+        ctx.strokeStyle = FOREST_GREEN;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(0, 0, w, h);
+      };
+
+      // STEREOMETER - scattered dots, NOT lines
+      const drawStereometer = (canvas) => {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        const cx = w / 2, baseY = h - 60;
+        const radius = h - 120;
+        
+        ctx.fillStyle = FOREST_GREEN;
+        ctx.fillRect(0, 0, w, h);
+        
+        // Graticule arcs
+        ctx.strokeStyle = COTTAGE_WHITE + '20';
+        ctx.lineWidth = 1;
+        [0.33, 0.66, 1].forEach(r => {
+          ctx.beginPath();
+          ctx.arc(cx, baseY, radius * r, Math.PI, 0);
+          ctx.stroke();
+        });
+        for (let d = 0; d <= 180; d += 30) {
+          const a = d * Math.PI / 180;
+          ctx.beginPath();
+          ctx.moveTo(cx, baseY);
+          ctx.lineTo(cx - Math.cos(a) * radius, baseY - Math.sin(a) * radius);
+          ctx.stroke();
+        }
+        
+        ctx.font = 'bold 18px system-ui';
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.textAlign = 'center';
+        ctx.fillText('L', cx - radius - 25, baseY + 8);
+        ctx.fillText('R', cx + radius + 25, baseY + 8);
+        ctx.fillText('M', cx, baseY - radius - 15);
+        
+        if (!analyserLRef.current || !analyserRRef.current) {
+          ctx.strokeStyle = COTTAGE_WHITE;
+          ctx.lineWidth = 3;
+          ctx.strokeRect(0, 0, w, h);
+          return;
+        }
+        
+        const fL = new Uint8Array(analyserLRef.current.frequencyBinCount);
+        const fR = new Uint8Array(analyserRRef.current.frequencyBinCount);
+        analyserLRef.current.getByteFrequencyData(fL);
+        analyserRRef.current.getByteFrequencyData(fR);
+        
+        const pts = [];
+        const numBins = fL.length;
+        const step = 2;
+        for (let i = 0; i < numBins; i += step) {
+          const lv = fL[i] / 255, rv = fR[i] / 255;
+          const mag = (lv + rv) / 2;
+          if (mag < 0.03) continue;
+          
+          const bal = Math.max(-1, Math.min(1, (lv - rv) * 3));
+          const angle = (Math.PI / 2) + (bal * Math.PI / 2);
+          const dist = mag * stereoGain * radius * 0.95;
+          
+          const px = cx + Math.cos(angle) * dist;
+          const py = baseY - Math.sin(angle) * dist;
+          const dotSize = 1 + mag * 4;
+          pts.push({ x: px, y: py, mag, size: dotSize });
+        }
+        
+        stereoBufferRef.current.push(pts);
+        while (stereoBufferRef.current.length > Math.max(1, stereoPersist)) stereoBufferRef.current.shift();
+        
+        const total = stereoBufferRef.current.length;
+        for (let f = 0; f < total; f++) {
+          const frame = stereoBufferRef.current[f];
+          const alpha = total > 1 ? (f + 1) / total : 1;
+          for (let i = 0; i < frame.length; i++) {
+            const p = frame[i];
+            ctx.fillStyle = `rgba(255, 255, 247, ${alpha * 0.8})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        
+        // Correlation bar
+        const tL = new Uint8Array(analyserLRef.current.fftSize);
+        const tR = new Uint8Array(analyserRRef.current.fftSize);
+        analyserLRef.current.getByteTimeDomainData(tL);
+        analyserRRef.current.getByteTimeDomainData(tR);
+        let sL = 0, sR = 0, sLR = 0;
+        for (let i = 0; i < tL.length; i++) {
+          const l = (tL[i] - 128) / 128, r = (tR[i] - 128) / 128;
+          sL += l * l; sR += r * r; sLR += l * r;
+        }
+        const corr = Math.sqrt(sL * sR) > 0.001 ? sLR / Math.sqrt(sL * sR) : 0;
+        
+        const bx = w - 50, by = 60, bw = 28, bh = h - 160;
+        ctx.fillStyle = COTTAGE_WHITE + '15';
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.strokeStyle = COTTAGE_WHITE + '50';
+        ctx.strokeRect(bx, by, bw, bh);
+        const mid = by + bh / 2;
+        ctx.strokeStyle = COTTAGE_WHITE + '40';
+        ctx.beginPath(); ctx.moveTo(bx, mid); ctx.lineTo(bx + bw, mid); ctx.stroke();
+        const fh = Math.abs(corr) * (bh / 2);
+        ctx.fillStyle = corr >= 0 ? COTTAGE_WHITE + 'AA' : '#f66a';
+        ctx.fillRect(bx + 2, corr >= 0 ? mid - fh : mid, bw - 4, fh);
+        ctx.font = 'bold 11px monospace';
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.textAlign = 'center';
+        ctx.fillText('+1', bx + bw / 2, by - 8);
+        ctx.fillText('0', bx + bw / 2, mid + 4);
+        ctx.fillText('-1', bx + bw / 2, by + bh + 15);
+        ctx.font = 'bold 14px monospace';
+        ctx.fillText(corr.toFixed(2), bx + bw / 2, h - 25);
+        
+        // Size legend - big dot on top, small on bottom
+        const lx = 28, ly = 55, lh = 90;
+        const dotSizes = [5, 4, 3, 2, 1];
+        const dotSpacing = lh / (dotSizes.length - 1);
+        for (let i = 0; i < dotSizes.length; i++) {
+          ctx.fillStyle = COTTAGE_WHITE + 'CC';
+          ctx.beginPath();
+          ctx.arc(lx, ly + i * dotSpacing, dotSizes[i], 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.font = '9px monospace';
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.textAlign = 'left';
+        ctx.fillText('LOUD', lx + 12, ly + 3);
+        ctx.fillText('QUIET', lx + 12, ly + lh + 3);
+        
+        ctx.strokeStyle = COTTAGE_WHITE;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(0, 0, w, h);
+      };
+
+      // VECTORSCOPE
+      const drawVectorscope = (canvas) => {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        const cx = w / 2, cy = h / 2;
+        const radius = Math.min(w, h) / 2 - 60;
+        
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = FOREST_GREEN + '25';
+        ctx.lineWidth = 1;
+        [0.25, 0.5, 0.75, 1].forEach(r => { ctx.beginPath(); ctx.arc(cx, cy, radius * r, 0, Math.PI * 2); ctx.stroke(); });
+        for (let i = 0; i < 8; i++) {
+          const a = (i * 45 - 90) * Math.PI / 180;
+          ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * radius, cy + Math.sin(a) * radius); ctx.stroke();
+        }
+        ctx.font = 'bold 14px system-ui';
+        ctx.fillStyle = FOREST_GREEN;
+        ctx.textAlign = 'center';
+        ctx.fillText('+M', cx, cy - radius - 15);
+        ctx.fillText('-M', cx, cy + radius + 25);
+        ctx.fillText('L', cx - radius - 20, cy + 5);
+        ctx.fillText('R', cx + radius + 20, cy + 5);
+        
+        if (!analyserLRef.current || !analyserRRef.current) { ctx.strokeStyle = FOREST_GREEN; ctx.lineWidth = 3; ctx.strokeRect(0, 0, w, h); return; }
+        
+        const dL = new Uint8Array(analyserLRef.current.fftSize);
+        const dR = new Uint8Array(analyserRRef.current.fftSize);
+        analyserLRef.current.getByteTimeDomainData(dL);
+        analyserRRef.current.getByteTimeDomainData(dR);
+        
+        const frame = [];
+        const rot = vecRotation * Math.PI / 180;
+        for (let i = 0; i < dL.length; i++) {
+          const l = (dL[i] - 128) / 128, r = (dR[i] - 128) / 128;
+          const x = l * vecGain * radius, y = -r * vecGain * radius;
+          frame.push({ x: cx + x * Math.cos(rot) - y * Math.sin(rot), y: cy + x * Math.sin(rot) + y * Math.cos(rot) });
+        }
+        persistBufferRef.current.push(frame);
+        while (persistBufferRef.current.length > vecPersist + 1) persistBufferRef.current.shift();
+        
+        persistBufferRef.current.forEach((fr, idx) => {
+          const age = persistBufferRef.current.length - idx - 1;
+          const alpha = Math.max(0.05, 1 - age / (vecPersist + 1));
+          ctx.strokeStyle = FOREST_GREEN;
+          ctx.globalAlpha = alpha * 0.7;
+          ctx.lineWidth = vecIntensity * alpha;
+          ctx.shadowColor = FOREST_GREEN;
+          ctx.shadowBlur = vecIntensity * 4 * alpha;
+          ctx.beginPath();
+          fr.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+          ctx.stroke();
+        });
+        ctx.globalAlpha = 1;
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = FOREST_GREEN;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(0, 0, w, h);
+      };
+
+      // OSCILLOSCOPE
+      const drawOscilloscope = (canvas) => {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.fillRect(0, 0, w, h);
+        ctx.strokeStyle = FOREST_GREEN + '25';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 10; i++) { ctx.beginPath(); ctx.moveTo(i * w / 10, 0); ctx.lineTo(i * w / 10, h); ctx.stroke(); }
+        for (let i = 0; i <= 8; i++) { ctx.beginPath(); ctx.moveTo(0, i * h / 8); ctx.lineTo(w, i * h / 8); ctx.stroke(); }
+        ctx.strokeStyle = FOREST_GREEN + '50';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+        
+        if (!analyserLRef.current || !analyserRRef.current) { ctx.strokeStyle = FOREST_GREEN; ctx.lineWidth = 3; ctx.strokeRect(0, 0, w, h); return; }
+        
+        const sr = audioContextRef.current?.sampleRate || 44100;
+        const samples = Math.min(Math.floor(scopeTimebase * 10 * sr / 1000), 2048);
+        const dL = new Uint8Array(analyserLRef.current.fftSize);
+        const dR = new Uint8Array(analyserRRef.current.fftSize);
+        analyserLRef.current.getByteTimeDomainData(dL);
+        analyserRRef.current.getByteTimeDomainData(dR);
+        
+        const findTrig = (d) => {
+          const th = 128 + triggerLevel * 128;
+          for (let i = 1; i < d.length - 1; i++) {
+            if (triggerEdge === 'rising' ? (d[i-1] < th && d[i] >= th) : (d[i-1] > th && d[i] <= th)) return i;
+          }
+          return 0;
+        };
+        const tp = triggerMode === 'auto' ? findTrig(dL) : 0;
+        
+        const draw = (d, color, yc) => {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          const scale = 0.25 / scopeVdiv;
+          const range = scopeLayout === 'split' ? h / 4 : h / 2;
+          for (let i = 0; i < samples && tp + i < d.length; i++) {
+            const x = (i / samples) * w;
+            const y = yc - ((d[tp + i] - 128) / 128) * scale * range;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        };
+        
+        if (scopeLayout === 'split') {
+          if (scopeChannel !== 'ch2') draw(dL, FOREST_GREEN, h / 4);
+          if (scopeChannel !== 'ch1') draw(dR, DEEP_RED, 3 * h / 4);
+        } else {
+          if (scopeChannel !== 'ch2') draw(dL, FOREST_GREEN, h / 2);
+          if (scopeChannel !== 'ch1') draw(dR, DEEP_RED, h / 2);
+        }
+        ctx.strokeStyle = FOREST_GREEN;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(0, 0, w, h);
+      };
+
+      // METER
+      const drawMeter = (canvas) => {
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width, h = canvas.height;
+        if (!analyserRef.current) return;
+        const td = new Uint8Array(analyserRef.current.fftSize);
+        analyserRef.current.getByteTimeDomainData(td);
+        let sum = 0, pk = 0;
+        for (let i = 0; i < td.length; i++) { const n = (td[i] - 128) / 128; sum += n * n; if (Math.abs(n) > pk) pk = Math.abs(n); }
+        const rms = Math.sqrt(sum / td.length);
+        const rmsDb = rms > 0.0001 ? 20 * Math.log10(rms) : -60;
+        const pkDb = pk > 0.0001 ? 20 * Math.log10(pk) : -60;
+        rmsDbRef.current += (rmsDb - rmsDbRef.current) * 0.3;
+        peakDbRef.current += (pkDb - peakDbRef.current) * 0.3;
+        const lufsI = rmsDb - 0.691;
+        lufsHistoryRef.current.push(lufsI);
+        if (lufsHistoryRef.current.length > 100) lufsHistoryRef.current.shift();
+        const avgL = lufsHistoryRef.current.reduce((a, b) => a + b, 0) / lufsHistoryRef.current.length;
+        lufsRef.current += (Math.max(-60, avgL) - lufsRef.current) * 0.1;
+        
+        ctx.fillStyle = COTTAGE_WHITE;
+        ctx.fillRect(0, 0, w, h);
+        
+        const drawDial = (cx, cy, r, dbVal, label) => {
+          ctx.strokeStyle = FOREST_GREEN;
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.stroke();
+          const minDb = -60, maxDb = 0;
+          [-60, -48, -36, -24, -12, 0].forEach(db => {
+            const norm = (db - minDb) / (maxDb - minDb);
+            const ang = Math.PI * 5/6 + norm * Math.PI * 4/3;
+            ctx.strokeStyle = FOREST_GREEN;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx + Math.cos(ang) * (r - 8), cy + Math.sin(ang) * (r - 8));
+            ctx.lineTo(cx + Math.cos(ang) * (r - 22), cy + Math.sin(ang) * (r - 22));
+            ctx.stroke();
+            ctx.font = 'bold 10px monospace';
+            ctx.fillStyle = FOREST_GREEN;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(db.toString(), cx + Math.cos(ang) * (r - 35), cy + Math.sin(ang) * (r - 35));
+          });
+          const clamped = Math.max(minDb, Math.min(maxDb, dbVal));
+          const norm = (clamped - minDb) / (maxDb - minDb);
+          const needleAng = Math.PI * 5/6 + norm * Math.PI * 4/3;
+          ctx.strokeStyle = DEEP_RED;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + Math.cos(needleAng) * (r - 45), cy + Math.sin(needleAng) * (r - 45));
+          ctx.stroke();
+          ctx.fillStyle = DEEP_RED;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.font = 'bold 16px system-ui';
+          ctx.fillStyle = FOREST_GREEN;
+          ctx.textAlign = 'center';
+          ctx.fillText(label, cx, cy + r + 25);
+          ctx.font = 'bold 18px monospace';
+          ctx.fillText(clamped.toFixed(1) + ' dB', cx, cy + r + 48);
+        };
+        const sp = w / 3;
+        drawDial(sp * 0.5, h / 2 - 10, 115, rmsDbRef.current, 'RMS');
+        drawDial(sp * 1.5, h / 2 - 10, 115, peakDbRef.current, 'PEAK');
+        drawDial(sp * 2.5, h / 2 - 10, 115, lufsRef.current, 'LUFS');
+        ctx.strokeStyle = FOREST_GREEN;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(0, 0, w, h);
+      };
+
+      const animate = () => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const draw = () => {
+          animationRef.current = requestAnimationFrame(draw);
+          if (isPlaying && audioContextRef.current && startTimeRef.current)
+            setCurrentTime(Math.min(audioContextRef.current.currentTime - startTimeRef.current, duration));
+          if (mode === 'spectrum') drawSpectrum(canvas);
+          else if (mode === 'spectrogram') drawSpectrogram(canvas);
+          else if (mode === 'oscilloscope') drawOscilloscope(canvas);
+          else if (mode === 'vectorscope') drawVectorscope(canvas);
+          else if (mode === 'stereometer') drawStereometer(canvas);
+          else if (mode === 'meter') drawMeter(canvas);
+        };
+        draw();
+      };
+
+      useEffect(() => {
+        if (isActive) { if (animationRef.current) cancelAnimationFrame(animationRef.current); animate(); }
+      }, [mode, isActive, scopeTimebase, scopeVdiv, scopeChannel, scopeLayout, triggerMode, triggerEdge, triggerLevel, vecGain, vecRotation, vecPersist, vecIntensity, stereoGain, stereoPersist, spectrogramSpeed]);
+
+      const btn = (active, color = FOREST_GREEN) => ({
+        padding: '8px 12px', backgroundColor: active ? color : COTTAGE_WHITE,
+        color: active ? COTTAGE_WHITE : color, border: `2px solid ${color}`,
+        fontWeight: '700', fontSize: '11px', cursor: 'pointer'
+      });
+
+      return (
+        <div style={{ backgroundColor: COTTAGE_WHITE, minHeight: '100vh', padding: '20px', fontFamily: 'system-ui' }}>
+          <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '10px' }}>
+              <div>
+                <h1 style={{ color: FOREST_GREEN, fontSize: '24px', fontWeight: '700', margin: 0 }}>MULTIVISION</h1>
+                <p style={{ color: FOREST_GREEN, fontSize: '10px', margin: 0, opacity: 0.7 }}>MINUTE TO MIDNIGHT EDITION</p>
+              </div>
+              {showMidnight && (
+                <>
+                  <style>{`@keyframes flash { 0%, 75% { opacity: 1; } 75.01%, 100% { opacity: 0.2; } }`}</style>
+                  <div style={{ color: '#740001', fontWeight: '700', fontSize: '20px', letterSpacing: '3px', fontFamily: 'monospace', animation: 'flash 1s infinite' }}>MID:NIGHT</div>
+                </>
+              )}
+              {audioSource === 'file' && !isLoading && (
+                <div style={{ fontFamily: 'monospace', fontSize: '14px', color: FOREST_GREEN, fontWeight: '700' }}>{formatTime(currentTime)} / {formatTime(duration)}</div>
+              )}
+            </div>
+            
+            {isLoading && (
+              <div style={{ border: `3px solid ${FOREST_GREEN}`, padding: '40px', marginBottom: '10px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>
+                <svg width="120" height="120" viewBox="0 0 200 200">
+                  <circle cx="100" cy="100" r="90" fill="none" stroke={FOREST_GREEN} strokeWidth="4"/>
+                  {[...Array(12)].map((_, i) => {
+                    const a = (i * 30 - 90) * Math.PI / 180;
+                    return <line key={i} x1={100 + Math.cos(a) * 80} y1={100 + Math.sin(a) * 80} x2={100 + Math.cos(a) * 68} y2={100 + Math.sin(a) * 68} stroke={FOREST_GREEN} strokeWidth="3"/>;
+                  })}
+                  <path d={`M 100 100 L ${100 + Math.cos(-93 * Math.PI / 180) * 82} ${100 + Math.sin(-93 * Math.PI / 180) * 82} A 82 82 0 ${loadingProgress > 0.5 ? 1 : 0} 1 ${100 + Math.cos((-93 + loadingProgress * 354) * Math.PI / 180) * 82} ${100 + Math.sin((-93 + loadingProgress * 354) * Math.PI / 180) * 82} Z`} fill={FOREST_GREEN} opacity="0.2"/>
+                  <line x1="100" y1="100" x2={100 + Math.cos((-93 + loadingProgress * 354) * Math.PI / 180) * 55} y2={100 + Math.sin((-93 + loadingProgress * 354) * Math.PI / 180) * 55} stroke={FOREST_GREEN} strokeWidth="5" strokeLinecap="round"/>
+                  <line x1="100" y1="100" x2="100" y2="35" stroke={FOREST_GREEN} strokeWidth="3" strokeLinecap="round"/>
+                  <circle cx="100" cy="100" r="7" fill={FOREST_GREEN}/>
+                </svg>
+                <div style={{ color: FOREST_GREEN, fontSize: '14px', fontWeight: '700', fontFamily: 'monospace' }}>
+                  {loadingProgress >= 1 ? 'MID:NIGHT' : `${Math.ceil((1 - loadingProgress) * 3)} MIN TO MIDNIGHT`}
+                </div>
+              </div>
+            )}
+            
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <label style={{ ...btn(!!selectedFile, DEEP_RED), padding: '6px 10px', cursor: 'pointer' }}>
+                {selectedFile ? selectedFile.name.slice(0, 12) + (selectedFile.name.length > 12 ? '...' : '') : 'LOAD AUDIO'}
+                <input type="file" accept="audio/*" onChange={(e) => e.target.files[0] && setSelectedFile(e.target.files[0])} style={{ display: 'none' }}/>
+              </label>
+              {selectedFile && <button onClick={() => startFileAudio(selectedFile)} style={{ ...btn(true), padding: '6px 10px' }}>▶ LOAD</button>}
+              {audioSource === 'file' && !isLoading && (
+                <>
+                  <button onClick={togglePlayPause} style={{ ...btn(isPlaying), padding: '6px 10px' }}>{isPlaying ? '❚❚' : '▶'}</button>
+                  <button onClick={stopAudio} style={{ ...btn(false), padding: '6px 10px' }}>◼</button>
+                  <button onClick={resetAudio} style={{ ...btn(false), padding: '6px 10px' }}>⟲</button>
+                </>
+              )}
+            </div>
+            
+            <div style={{ display: 'flex', gap: '6px', marginBottom: '10px', flexWrap: 'wrap', justifyContent: 'center' }}>
+              {['spectrum', 'spectrogram', 'oscilloscope', 'vectorscope', 'stereometer', 'meter'].map(m => (
+                <button key={m} onClick={() => { setMode(m); if (m === 'spectrogram') spectrogramBufferRef.current = []; }} style={{ ...btn(mode === m), padding: '6px 12px', fontSize: '10px' }}>{m.toUpperCase()}</button>
+              ))}
+            </div>
+            
+            {audioSource === 'file' && !isLoading && waveformData && (
+              <div style={{ marginBottom: '10px' }}>
+                <canvas ref={waveformCanvasRef} width={1140} height={40} onClick={handleWaveformClick} style={{ display: 'block', width: '100%', height: '40px', cursor: 'pointer', border: `2px solid ${FOREST_GREEN}` }}/>
+              </div>
+            )}
+            
+            {(mode === 'oscilloscope' || mode === 'vectorscope' || mode === 'stereometer' || mode === 'spectrogram') && (
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '10px', alignItems: 'center', flexWrap: 'wrap', padding: '8px 12px', border: `2px solid ${FOREST_GREEN}`, justifyContent: 'center' }}>
+                {mode === 'oscilloscope' && (
+                  <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ color: FOREST_GREEN, fontSize: '9px', fontWeight: '700' }}>TIME</span>
+                      {[0.5, 1, 2, 5, 10].map(t => <button key={t} onClick={() => setScopeTimebase(t)} style={{ ...btn(scopeTimebase === t), padding: '3px 6px', fontSize: '9px' }}>{t}</button>)}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ color: FOREST_GREEN, fontSize: '9px', fontWeight: '700' }}>V/DIV</span>
+                      {[0.5, 0.25, 0.1, 0.05].map(v => <button key={v} onClick={() => setScopeVdiv(v)} style={{ ...btn(scopeVdiv === v), padding: '3px 6px', fontSize: '9px' }}>{v}</button>)}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ color: FOREST_GREEN, fontSize: '9px', fontWeight: '700' }}>CH</span>
+                      {['both', 'ch1', 'ch2'].map(c => <button key={c} onClick={() => setScopeChannel(c)} style={{ ...btn(scopeChannel === c), padding: '3px 6px', fontSize: '9px' }}>{c.toUpperCase()}</button>)}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ color: FOREST_GREEN, fontSize: '9px', fontWeight: '700' }}>LAYOUT</span>
+                      {['split', 'overlay'].map(l => <button key={l} onClick={() => setScopeLayout(l)} style={{ ...btn(scopeLayout === l), padding: '3px 6px', fontSize: '9px' }}>{l.toUpperCase()}</button>)}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ color: FOREST_GREEN, fontSize: '9px', fontWeight: '700' }}>TRIG</span>
+                      {['auto', 'off'].map(t => <button key={t} onClick={() => setTriggerMode(t)} style={{ ...btn(triggerMode === t), padding: '3px 6px', fontSize: '9px' }}>{t.toUpperCase()}</button>)}
+                      {triggerMode === 'auto' && ['rising', 'falling'].map(e => <button key={e} onClick={() => setTriggerEdge(e)} style={{ ...btn(triggerEdge === e), padding: '3px 6px', fontSize: '9px' }}>{e === 'rising' ? '↗' : '↘'}</button>)}
+                    </div>
+                  </>
+                )}
+                {mode === 'vectorscope' && (
+                  <>
+                    <Knob value={vecGain} min={0.5} max={4} step={0.1} label="GAIN" onChange={setVecGain} />
+                    <Knob value={vecRotation} min={-45} max={45} step={5} label="ROTATION" onChange={setVecRotation} />
+                    <Knob value={vecPersist} min={0} max={60} step={5} label="PERSIST" onChange={setVecPersist} />
+                    <Knob value={vecIntensity} min={1} max={5} step={0.5} label="INTENSITY" onChange={setVecIntensity} />
+                  </>
+                )}
+                {mode === 'stereometer' && (
+                  <>
+                    <Knob value={stereoGain} min={0.5} max={4} step={0.1} label="GAIN" onChange={setStereoGain} />
+                    <Knob value={stereoPersist} min={1} max={60} step={1} label="PERSIST" onChange={setStereoPersist} />
+                  </>
+                )}
+                {mode === 'spectrogram' && (
+                  <Knob value={spectrogramSpeed} min={1} max={8} step={1} label="SPEED" onChange={setSpectrogramSpeed} />
+                )}
+              </div>
+            )}
+            
+            <div style={{ border: `3px solid ${FOREST_GREEN}`, position: 'relative' }}>
+              <canvas
+                ref={canvasRef}
+                width={1200}
+                height={600}
+                onMouseMove={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  canvasHoverRef.current = { x: (e.clientX - rect.left) * (1200 / rect.width), y: (e.clientY - rect.top) * (600 / rect.height), active: true };
+                }}
+                onMouseLeave={() => { canvasHoverRef.current.active = false; }}
+                style={{ display: 'block', width: '100%', height: 'auto', cursor: mode === 'spectrum' ? 'crosshair' : 'default' }}
+              />
+              {!isActive && (
+                <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', color: FOREST_GREEN, fontSize: '14px', fontWeight: '700', opacity: 0.5 }}>
+                  STANDING BY... LOAD AUDIO FILE
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<AudioVisualizer />);
+  </script>
+</body>
+</html>
