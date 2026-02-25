@@ -107,7 +107,7 @@ If you're reading this and wondering whether I can manage technical projects and
 
 ## License
 
-MIT
+Apache 2.0
 
 ---
 
